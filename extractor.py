@@ -1,9 +1,7 @@
 from bs4 import BeautifulSoup
 from bs4.element import Tag
-import re
-import requests
 import chardet
-import heapq
+import re
 
 
 def encode_detect(text):
@@ -14,7 +12,8 @@ def encode_detect(text):
 
 
 def remove_control_characters(text):
-    RE_XML_ILLEGAL = u'([\u0000-\u0008\u000b-\u000c\u000e-\u001f\ufffe-\uffff])' + \
+    """删除控制字符"""
+    RE_ILLEGAL = u'([\u0000-\u0008\u000b-\u000c\u000e-\u001f\ufffe-\uffff])' + \
                      u'|' + \
                      u'([%s-%s][^%s-%s])|([^%s-%s][%s-%s])|([%s-%s]$)|(^[%s-%s])' % \
                      (chr(0xd800), chr(0xdbff), chr(0xdc00), chr(0xdfff),
@@ -22,10 +21,9 @@ def remove_control_characters(text):
                       chr(0xd800), chr(0xdbff), chr(0xdc00), chr(0xdfff),
                       ) + \
                      u'|\u3000'
-    text = re.sub(RE_XML_ILLEGAL, "", text)
+    text = re.sub(RE_ILLEGAL, "", text)
     text = re.sub(r"[\x01-\x1F\x7F]", "", text)
     return text
-
 
 
 class Paragraph(object):
@@ -34,22 +32,11 @@ class Paragraph(object):
         self.id = id
         self.pid = pid
         self.element = element
+        self.text = remove_control_characters(self.element.get_text())
 
     @property
     def length(self):
-        return len(self.element.get_text())
-
-    @property
-    def text(self):
-        return remove_control_characters(self.element.get_text())
-
-    @property
-    def density(self):
-        return self.length / (len(self.element.encode().decode()) * 1.0)
-
-    def __lt__(self, other):
-        print(self.id, other.id)
-        return self.id < other.id
+        return len(self.text)
 
 
 class Section(object):
@@ -57,93 +44,39 @@ class Section(object):
     def __init__(self, id):
         self.id = id
         self.paragraphs = []
-        self._length = 0
-        self.length = 0
-
-    def add_paragraph(self, paragraph, add=True):
-        self.paragraphs.append(paragraph)
-        if add:
-            self._length += len(paragraph.text)
-        self.length += len(paragraph.text)
 
     @property
-    def ordered_paragraphs(self):
-        return sorted(self.paragraphs, key=lambda p: p.id, reverse=False)
+    def length(self):
+        return sum([paragraph.length for paragraph in self.paragraphs])
 
-    @property
-    def text(self):
-        text = ''
+    def has_paragraph(self, id):
         for paragraph in self.paragraphs:
-            text += paragraph.text
-        return text
-
-
-class Article(object):
-
-    def __init__(self):
-        self.sections = []
-        self.paragraph_ids = []
-
-    def add_paragraph(self, pid, paragraph, add=True):
-        section = self._find_section(pid)
-        flag = False
-        if section is None:
-            flag = True
-            section = Section(pid)
-        section.add_paragraph(paragraph, add)
-        if flag:
-            self.sections.append(section)
-
-        self.paragraph_ids.append(paragraph.id)
-
-    def add_others(self, pid, paragraph):
-        if not self.is_existed(pid):
-            return
-
-        if paragraph.id not in self.paragraph_ids:
-            self.add_paragraph(pid, paragraph, add=False)
-
-    def _find_section(self, id):
-        for section in self.sections:
-            if id == section.id:
-                return section
-
-        return None
-
-    def is_existed(self, id):
-        for section in self.sections:
-            if section.id == id:
+            if paragraph.id == id:
                 return True
         return False
 
-    @property
-    def content(self):
-        sections = sorted(self.sections, key=lambda section: section._length, reverse=True)
-        return sections[0]
 
-    def print_sections(self):
-        for section in self.sections:
-            print('section', section.length)
-            for paragraph in section.paragraphs:
-                print(paragraph.id, paragraph.text, paragraph.density)
-
-
-class ArticleExtractor(object):
+class Article(object):
     EXCLUDED_TAGS = ['script', 'style', 'iframe']
 
     def __init__(self, html_raw):
-        self.soup = BeautifulSoup(html_raw, 'html5lib', from_encoding=encode_detect(html_raw))
-        self.elements = self._traverse()
-        self.article = Article()
+        self.soup = BeautifulSoup(
+            html_raw,
+            'html5lib',
+            from_encoding=encode_detect(html_raw)
+        )
+        self.sections = []
+        self.paragraphs = []
+        self.elements = []
+        self.content = None
         self._clean()
+        self._find_element_p()
+        self._find_paragraphs()
+        self._find_sections()
+        self._find_content()
 
-    def _clean(self):
-        """清理html文档中的冗余数据"""
-        for element in self.soup(self.EXCLUDED_TAGS):
-            element.decompose()
-
-    def _traverse(self):
-        """遍历整个html文档"""
+    def _find_element_p(self):
+        """找到所有的p标签"""
         elements = []
         stack = [(self.soup, 0)]
         element_id = 0
@@ -160,24 +93,58 @@ class ArticleExtractor(object):
                 if isinstance(child_element, Tag):
                     stack.append((child_element, element_id))
 
-        return elements
+        self.elements = elements
 
-    def _build_paragraphs(self):
+    def _find_paragraphs(self):
+        """找到所有的Paragraph"""
         for id, pid, element in self.elements:
             if element.name == 'p':
-                self.article.add_paragraph(pid, Paragraph(id, pid, element))
+                self.paragraphs.append(Paragraph(id, pid, element))
 
-    def _complete_article(self):
-        for id, pid, element in self.elements:
-            self.article.add_others(pid, Paragraph(id, pid, element))
+    def _find_sections(self):
+        """找到所有的Section"""
+        for paragraph in self.paragraphs:
+            section = self._find_section_by_paragraph(paragraph)
+            section.paragraphs.append(paragraph)
+
+    def _find_content(self):
+        """找到正文"""
+        ordered_sections = sorted(self.sections, key=lambda s: s.length, reverse=True)
+        self.content = ordered_sections[0]
+
+    @property
+    def text(self):
+        for paragraph in self.paragraphs:
+            if paragraph.pid == self.content.id and \
+                    not self.content.has_paragraph(paragraph.id):
+                self.content.paragraphs(paragraph)
+
+        ordered_paragraphs = sorted(
+            self.content.paragraphs,
+            key=lambda p: p.id
+        )
+
+        return "\n".join([paragraph.text for paragraph in ordered_paragraphs])
+
+
+    def _clean(self):
+        """清理html文档中的冗余数据"""
+        for element in self.soup(self.EXCLUDED_TAGS):
+            element.decompose()
+
+    def _find_section_by_paragraph(self, paragraph):
+        for section in self.sections:
+            if section.id == paragraph.pid:
+                return section
+
+        section = Section(paragraph.pid)
+        self.sections.append(section)
+        return section
+
 
 if __name__ == '__main__':
-    url = 'http://tech.sina.com.cn/i/2017-10-18/doc-ifymviyp2139855.shtml'
+    url = 'http://finance.sina.com.cn/china/gncj/2017-10-18/doc-ifymviyp2242742.shtml'
+    import requests
     response = requests.get(url)
-    extractor = ArticleExtractor(response.content)
-    extractor._build_paragraphs()
-    extractor._complete_article()
-    # extractor.article.print_sections()
-    section = extractor.article.content
-    for paragraph in section.ordered_paragraphs:
-        print(paragraph.id, paragraph.text, paragraph.density)
+    article = Article(response.content)
+    print(article.text)
