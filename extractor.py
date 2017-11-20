@@ -5,10 +5,51 @@
     A simple html extractor.
 
 """
+from functools import reduce
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
 EXCLUDE_TAGS = ['script', 'style', 'iframe', 'noscript', 'link', 'meta', 'ins']
+
+
+def assoc(d, key, value):
+    d[key] = value
+    return d
+
+
+def call(fn, key, source=None):
+    def apply_fn(record):
+        _key = source or key
+        return assoc(record, key, fn(record.get(_key)))
+    return apply_fn
+
+
+def pipeline_each(data, fns):
+    return reduce(
+        lambda a, x: map(x, a),
+        fns,
+        data)
+
+
+def extract_groups(soup, url=None):
+    """Extract all tags from html document"""
+    stack = [soup]
+    groups = []
+    while len(stack):
+        element = stack.pop()
+
+        children = []
+        for child_element in element.children:
+            if isinstance(child_element, Tag):
+                stack.append(child_element)
+                children.append(child_element)
+        if children:
+            groups.append({
+                'elements': children,
+                'tags': list(map(lambda ele: ele.name, children)),
+                'images': list(filter(lambda ele: ele.name == 'img', children))
+            })
+    return groups
 
 
 def remove_excluded_tags(soup, exclude_tags=None):
@@ -20,30 +61,48 @@ def remove_excluded_tags(soup, exclude_tags=None):
         tag.decompose()
 
 
-def group_tags(soup):
-    """Extract all tags from html document"""
+def encode_to_utf8(nbytes):
+    import chardet
+    res = chardet.detect(nbytes)
+    print(res)
+    _encode = res['encoding']
+    if _encode != 'utf-8':
+        nbytes.decode(_encode, 'ignore').encode('utf-8')
+    return nbytes
+
+
+def test(html):
+    soup = BeautifulSoup(html, 'html5lib')
     remove_excluded_tags(soup)
-    stack = [soup]
-    while len(stack):
-        element = stack.pop()
+    groups = extract_groups(soup)
+    results = pipeline_each(groups, [
+        call(
+            lambda elements: reduce(
+                lambda a, ele: a + len(ele.get_text()) if ele.name == 'p' else 0,
+                elements,
+                0
+            ),
+            'length',
+            'elements'),
+        call(
+            lambda elements: reduce(
+                lambda a, ele: a + ele.encode().decode(),
+                elements,
+                ''
+            ),
+            'html',
+            'elements'
+        )
+    ])
+    for i in results:
+        print(i['tags'], i['length'], i['images'])
 
-        children = []
-        for child_element in element.children:
-            if isinstance(child_element, Tag):
-                stack.append(child_element)
-                children.append(child_element)
-        if children:
-            yield children
-
-
-def sort_groups(groups):
-    return sorted(groups, key=lambda g: len(g), reverse=True)
+    groups = extract_groups(soup)
 
 
 if __name__ == '__main__':
     import requests
-    url = 'http://mp.weixin.qq.com/s?src=11&timestamp=1510758727&ver=516&signature=J7-OMfiyT0zc15gCpJdDSJghTBV9Ids-k0Ycn0hptRZjZ9csW1nl3AuZECh7xVe1fAdwUje*dylfmFXvv2hB43isYUuGrB*IuumggGGluuSsfhD97fkZcXxbDboj3scc&new=1'
+    import chardet
+    url = 'http://hot.cnbeta.com/articles/movie/670795.htm'
     resp = requests.get(url)
-    soup = BeautifulSoup(resp.content, 'html5lib')
-    for g in sort_groups(group_tags(soup)):
-        print(list(map(lambda x: x.name, g)))
+    test(resp.content)
