@@ -8,6 +8,8 @@
 from functools import reduce
 from bs4 import BeautifulSoup
 from bs4.element import Tag
+import re
+
 
 EXCLUDE_TAGS = ['script', 'style', 'iframe', 'noscript', 'link', 'meta', 'ins']
 
@@ -31,6 +33,25 @@ def pipeline_each(data, fns):
         data)
 
 
+def encode_to_utf8(nbytes):
+    import chardet
+    res = chardet.detect(nbytes)
+    print(res)
+    _encode = res['encoding']
+    if _encode != 'utf-8':
+        nbytes.decode(_encode, 'ignore').encode('utf-8')
+    return nbytes
+
+
+def remove_excluded_tags(soup, exclude_tags=None):
+    """Remove excluded tags"""
+    if not exclude_tags:
+        exclude_tags = EXCLUDE_TAGS
+
+    for tag in soup(exclude_tags):
+        tag.decompose()
+
+
 def extract_groups(soup, url=None):
     """Extract all tags from html document"""
     stack = [soup]
@@ -52,28 +73,7 @@ def extract_groups(soup, url=None):
     return groups
 
 
-def remove_excluded_tags(soup, exclude_tags=None):
-    """Remove excluded tags"""
-    if not exclude_tags:
-        exclude_tags = EXCLUDE_TAGS
-
-    for tag in soup(exclude_tags):
-        tag.decompose()
-
-
-def encode_to_utf8(nbytes):
-    import chardet
-    res = chardet.detect(nbytes)
-    print(res)
-    _encode = res['encoding']
-    if _encode != 'utf-8':
-        nbytes.decode(_encode, 'ignore').encode('utf-8')
-    return nbytes
-
-
-def test(html):
-    soup = BeautifulSoup(html, 'html5lib')
-    remove_excluded_tags(soup)
+def extract_content(soup):
     groups = extract_groups(soup)
     results = pipeline_each(groups, [
         call(
@@ -94,10 +94,17 @@ def test(html):
             'elements'
         )
     ])
-    for i in results:
-        print(i['tags'], i['length'], i['images'])
+    sorted_results = sorted(results, key=lambda x: x['length'], reverse=True)
+    if len(sorted_results):
+        return sorted_results[0]['html']
+    return ''
 
-    groups = extract_groups(soup)
+
+def extract_title(soup):
+    title_element = soup.find('title')
+    title = title_element.get_text()
+    title = re.split('_|——|\|', title)[0].strip()
+    return title
 
 
 if __name__ == '__main__':
@@ -105,4 +112,9 @@ if __name__ == '__main__':
     import chardet
     url = 'http://hot.cnbeta.com/articles/movie/670795.htm'
     resp = requests.get(url)
-    test(resp.content)
+    soup = BeautifulSoup(resp.content, 'html5lib')
+    remove_excluded_tags(soup)
+    content = extract_content(soup)
+    title = extract_title(soup)
+    print(title)
+    print(content)
